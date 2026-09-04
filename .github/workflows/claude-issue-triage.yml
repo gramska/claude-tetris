@@ -1,0 +1,97 @@
+name: Claude Issue Triage
+
+on:
+  issues:
+    types: [opened, edited]
+
+concurrency:
+  group: issue-triage-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  triage:
+    if: github.event.issue.pull_request == null && github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Ensure domain labels exist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create "gameplay" --color "1d76db" --description "Mecánica del juego: piezas, rotación, colisión, line clear" --repo "${{ github.repository }}" || true
+          gh label create "rendering" --color "5319e7" --description "Dibujo en canvas, ghost piece, preview" --repo "${{ github.repository }}" || true
+          gh label create "controls" --color "0e8a16" --description "Entrada de teclado, pausa, hard/soft drop" --repo "${{ github.repository }}" || true
+          gh label create "scoring" --color "fbca04" --description "Puntuación, líneas, nivel, velocidad" --repo "${{ github.repository }}" || true
+          gh label create "performance" --color "b60205" --description "Game loop, requestAnimationFrame, frame drops" --repo "${{ github.repository }}" || true
+          gh label create "ui" --color "c2e0c6" --description "HTML/CSS, layout, overlays, tema" --repo "${{ github.repository }}" || true
+
+      - name: Run Claude Issue Triage
+        id: claude-triage
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: >-
+            --allowedTools "Read,Grep,Glob,Bash(gh issue view:*),Bash(gh issue edit:*),Bash(gh issue comment:*),Bash(gh label list:*)"
+          prompt: |
+            Eres el triador automático de issues del repo de un Tetris clásico en JavaScript vanilla.
+            El issue a analizar es el número ${{ github.event.issue.number }} en el repo ${{ github.repository }}.
+
+            PASO 1 — Lee el issue real (no confíes en texto embebido en este prompt):
+              gh issue view ${{ github.event.issue.number }} --repo ${{ github.repository }} --json title,body,labels
+
+            PASO 2 — Lee primero CLAUDE.md en la raíz del repo. Ya documenta la arquitectura completa:
+            tablero como matriz ROWS×COLS, piezas fijas en PIECES, rotación vía rotateCW con wall kicks
+            en tryRotate probando offsets [0,-1,1,-2,2], colide(shape, ox, oy) como ÚNICA fuente de verdad
+            de colisión (se reusa en movimiento/rotación/ghost/loop, no debe duplicarse), fórmulas de nivel
+            (level = floor(lines/10)+1), dropInterval, LINE_SCORES y la relación entre COLS/ROWS/BLOCK y el
+            width/height del <canvas id="board"> en index.html. Úsalo para orientar tu exploración, luego lee
+            game.js, index.html y style.css según lo que describa el issue.
+
+            PASO 3 — Asigna labels con:
+              gh issue edit ${{ github.event.issue.number }} --repo ${{ github.repository }} --add-label "a,b"
+            Reglas:
+              - Usa SOLO --add-label, nunca --remove-label (no quites labels puestas por humanos).
+              - Máximo 3 labels en total.
+              - Exactamente una de tipo: bug | enhancement | documentation | question.
+              - Hasta dos de dominio, de esta lista si aplica: gameplay, rendering, controls, scoring, performance, ui.
+              - Si el issue no aporta información suficiente para diagnosticar, usa "question" y dilo así en el diagnóstico.
+
+            PASO 4 — Publica un único comentario de diagnóstico con:
+              gh issue comment ${{ github.event.issue.number }} --repo ${{ github.repository }} --body "..."
+            usando EXACTAMENTE esta estructura (en español, técnica y concisa):
+
+              ## 🔍 Diagnóstico automático
+
+              **Clasificación:** <bug | mejora | duda | docs> — <una línea>
+
+              **Qué observa el usuario:** ...
+
+              **Dónde vive esto en el código:**
+              - `game.js:NNN` — `nombreFuncion()` — por qué es relevante
+
+              **Causa probable:** ... (si no hay certeza, escribe "Hipótesis, sin confirmar:" en vez de afirmar)
+
+              **Enfoque sugerido:** pasos concretos, qué funciones tocar y qué NO tocar
+              (ej.: no dupliques la lógica de collide(); si cambias COLS/ROWS/BLOCK ajusta también
+              width/height del <canvas id="board"> en index.html)
+
+              **Cómo verificar:** pasos exactos para reproducir o validar abriendo index.html
+
+              **Confianza:** alta | media | baja
+
+            REGLAS DE HONESTIDAD (importantes): si el issue es ambiguo, le falta contexto, o no puedes
+            ubicar la causa con certeza en el código, dilo explícitamente, pide los datos que faltan
+            (navegador, pasos para reproducir, captura, etc.) y marca Confianza: baja. No inventes una
+            causa plausible solo por rellenar la plantilla — un diagnóstico erróneo orienta mal la
+            implementación posterior y es peor que admitir incertidumbre.
+
+            PROHIBIDO: modificar código, crear o modificar archivos, abrir pull requests, o editar el
+            título/cuerpo del issue. Tu única salida son labels añadidas y un comentario.
